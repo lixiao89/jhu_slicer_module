@@ -1,0 +1,2427 @@
+# This module was tested on 3D Slicer version 4.3.1
+
+# To get the latest version of 3D Slicer, visit http://download.slicer.org
+
+# This file (or the corresponding .pyc file) should be located in
+
+# 'C:\Program Files\Slicer 4.3.1\lib\Slicer-4.3\qt-scripted-modules\PANavigationPythonLib.py'
+
+#
+
+# IMPORTANT NOTICE: This version of PANavigationPythonLib.py is not compatible with 3D Slicer version 3.x
+
+#
+
+#
+
+# Sungmin Kim and Peter Kazanzides
+
+#
+
+
+
+# This should be consistent with main CMakeLists.txt
+
+#SARRP_MODULE_VERSION = "3.1.8"
+
+import os, sys, math, json, time, socket, numpy
+
+from __main__ import vtk, qt, ctk, slicer
+
+
+# PANavigationPython Configuration File
+
+from PANavigationPythonConfig import *
+
+
+
+
+
+
+
+################################ GLOBAL FUNCTIONS ###################################################
+
+
+#
+
+# PANavigationPythonGUIInternal
+
+#
+
+class PANavigationPythonGUIInternal:
+
+    def __init__(self, parent = None):
+
+        if not parent:
+
+            self.parent = slicer.qMRMLWidget()
+
+            self.parent.setLayout(qt.QVBoxLayout())
+
+            self.parent.setMRMLScene(slicer.mrmlScene)
+
+        else:
+
+            self.parent = parent
+
+        self.layout = self.parent.layout()
+
+        if not parent:
+
+            self.setup()
+
+            self.parent.show()
+
+
+
+
+
+        self.scene = slicer.mrmlScene
+
+        self.scene.AddObserver(slicer.vtkMRMLScene.NodeAddedEvent, self.NodeAddedEvent)
+
+        #self.scene.AddObserver(slicer.vtkMRMLScene.NodeRemoveEvent, self.NodeRemoveEvent)
+
+        
+
+        # for QTableWidget (tracking fiducials)
+
+        self.trackingFiducialWidgetItems = []
+
+        self.ModifyingTrackingFiducial = False
+
+        
+
+        # fiducials for Tracking data
+
+        self.MarkupsTrackingNode = self.scene.CreateNodeByClass('vtkMRMLMarkupsFiducialNode')
+
+        self.MarkupsTrackingNode.SetName('TrackingFiducials')
+
+#        self.MarkupsTrackingNode.AddObserver(slicer.vtkMRMLMarkupsNode.PointModifiedEvent, self.trackingFiducialModified)
+
+        self.scene.AddNode(self.MarkupsTrackingNode)
+
+        
+
+        # for QTableWidget (fiducials)
+
+        self.fiducialWidgetItems = []
+
+        self.ModifyingFiducial = False          # Tag
+
+        
+
+        # fiducials for Image data
+
+        self.MarkupsNode = self.scene.CreateNodeByClass('vtkMRMLMarkupsFiducialNode')
+
+        self.MarkupsNode.SetName('ImageFiducials')
+
+        self.MarkupsNode.AddObserver(slicer.vtkMRMLMarkupsNode.MarkupAddedEvent, self.FiducialAdded)
+
+        self.MarkupsNode.AddObserver(slicer.vtkMRMLMarkupsNode.MarkupRemovedEvent, self.FiducialDeleted)
+
+        self.MarkupsNode.AddObserver(slicer.vtkMRMLMarkupsNode.PointModifiedEvent, self.FiducialModified)
+
+        self.scene.AddNode(self.MarkupsNode)
+
+        
+
+        # linear transform for realtime image plane
+
+        self.photoacousticImageNode = self.scene.CreateNodeByClass('vtkMRMLLinearTransformNode')
+
+        self.photoacousticImageNode.SetName('PhotoacousticImage')
+
+        self.scene.AddNode(self.photoacousticImageNode)
+
+
+
+        transform = vtk.vtkMatrix4x4()
+
+        transform.SetElement(0, 0, -1.0)
+
+        transform.SetElement(0, 1, 0.0)
+
+        transform.SetElement(0, 2, 0.0)
+
+        transform.SetElement(0, 3, -60.0)
+
+
+
+        transform.SetElement(1, 0, 0.0)
+
+        transform.SetElement(1, 1, -1.0)
+
+        transform.SetElement(1, 2, 0.0)
+
+        transform.SetElement(1, 3, 60.0)
+
+
+
+        transform.SetElement(2, 0, 0.0)
+
+        transform.SetElement(2, 1, 0.0)
+
+        transform.SetElement(2, 2, 1.0)
+
+        transform.SetElement(2, 3, 0.0)
+
+
+
+        transform.SetElement(3, 0, 0.0)
+
+        transform.SetElement(3, 1, 0.0)
+
+        transform.SetElement(3, 2, 0.0)
+
+        transform.SetElement(3, 3, 1.0)
+
+
+
+        self.photoacousticImageNode.ApplyTransformMatrix(transform)
+
+
+
+        # ROI for fast GPU computation
+
+        self.RoiNode = self.scene.CreateNodeByClass('vtkMRMLAnnotationROINode')
+
+        self.RoiNode.SetRadiusXYZ(10, 10, 10)       # Set a default radius of ROI.
+
+        self.RoiNode.AddObserver(slicer.vtkMRMLAnnotationROINode.ValueModifiedEvent, self.RoiValudeModified)
+
+        self.scene.AddNode(self.RoiNode)
+
+        self.RoiNode.SetDisplayVisibility(False)
+
+
+
+        #OpenIGTLink Server Setting
+
+        self.numIGTLConnectorNode = self.scene.GetNumberOfNodesByClass('vtkMRMLIGTLConnectorNode')
+
+        if self.numIGTLConnectorNode == 0:
+
+            self.oigtlConnector = slicer.vtkMRMLIGTLConnectorNode()
+
+            self.oigtlConnector.SetName(OIGTL_01_CONNECT_NAME)
+
+            self.oigtlConnector.SetTypeServer(OIGTL_01_PORT)
+
+            self.oigtlConnector.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ConnectedEvent,    self.OpenIGTLinkConnected)
+
+            self.oigtlConnector.AddObserver(slicer.vtkMRMLIGTLConnectorNode.DisconnectedEvent, self.OpenIGTLinkDisconnected)
+
+            self.oigtlConnector.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ActivatedEvent,    self.OpenIGTLinkActivated)
+
+            self.oigtlConnector.AddObserver(slicer.vtkMRMLIGTLConnectorNode.DeactivatedEvent,  self.OpenIGTLinkDeactivated)
+
+            self.oigtlConnector.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ReceiveEvent,      self.OpenIGTLinkReceive)
+
+            self.oigtlConnector.AddObserver(slicer.vtkMRMLIGTLConnectorNode.NewDeviceEvent,    self.OpenIGTLinkNewDevice)
+
+            #self.oigtlInitialized = False
+
+
+
+            #self.numOIGTLConnectorNode = 0;
+
+            slicer.mrmlScene.AddNode(self.oigtlConnector)
+
+            self.oigtlConnector.Start()
+
+
+
+            self.oigtlConnector1 = slicer.vtkMRMLIGTLConnectorNode()
+
+            self.oigtlConnector1.SetName(OIGTL_02_CONNECT_NAME)
+
+            self.oigtlConnector1.SetTypeServer(OIGTL_02_PORT)
+
+            self.oigtlConnector1.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ConnectedEvent,    self.OpenIGTLinkConnected)
+
+            self.oigtlConnector1.AddObserver(slicer.vtkMRMLIGTLConnectorNode.DisconnectedEvent, self.OpenIGTLinkDisconnected)
+
+            self.oigtlConnector1.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ActivatedEvent,    self.OpenIGTLinkActivated)
+
+            self.oigtlConnector1.AddObserver(slicer.vtkMRMLIGTLConnectorNode.DeactivatedEvent,  self.OpenIGTLinkDeactivated)
+
+            self.oigtlConnector1.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ReceiveEvent,      self.OpenIGTLinkReceive)
+
+            self.oigtlConnector1.AddObserver(slicer.vtkMRMLIGTLConnectorNode.NewDeviceEvent,    self.OpenIGTLinkNewDevice)
+
+            #self.oigtlInitialized = False
+
+
+
+            #self.numOIGTLConnectorNode = 0;
+
+            slicer.mrmlScene.AddNode(self.oigtlConnector1)
+
+            self.oigtlConnector1.Start()
+
+        
+
+            self.oigtlConnector2 = slicer.vtkMRMLIGTLConnectorNode()
+
+            self.oigtlConnector2.SetName(OIGTL_03_CONNECT_NAME)
+
+            #self.oigtlConnector2.SetTypeServer(OIGTL_03_PORT)
+
+            self.oigtlConnector2.SetTypeClient(OIGTL_03_IP, OIGTL_03_PORT)
+
+            self.oigtlConnector2.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ConnectedEvent,    self.OpenIGTLinkConnected)
+
+            self.oigtlConnector2.AddObserver(slicer.vtkMRMLIGTLConnectorNode.DisconnectedEvent, self.OpenIGTLinkDisconnected)
+
+            self.oigtlConnector2.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ActivatedEvent,    self.OpenIGTLinkActivated)
+
+            self.oigtlConnector2.AddObserver(slicer.vtkMRMLIGTLConnectorNode.DeactivatedEvent,  self.OpenIGTLinkDeactivated)
+
+            self.oigtlConnector2.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ReceiveEvent,      self.OpenIGTLinkReceive)
+
+            self.oigtlConnector2.AddObserver(slicer.vtkMRMLIGTLConnectorNode.NewDeviceEvent,    self.OpenIGTLinkNewDevice)
+
+            #self.oigtlInitialized = False
+
+        
+
+            #self.numOIGTLConnectorNode = 0;
+
+            slicer.mrmlScene.AddNode(self.oigtlConnector2)
+
+            self.oigtlConnector2.Start()
+
+        else:
+
+            node = self.scene.GetNodesByName(OIGTL_01_CONNECT_NAME)
+
+            if node.GetNumberOfItems() == 0:
+
+                self.oigtlConnector = slicer.vtkMRMLIGTLConnectorNode()
+
+                self.oigtlConnector.SetName(OIGTL_01_CONNECT_NAME)
+
+                self.oigtlConnector.SetTypeServer(OIGTL_01_PORT)
+
+                self.oigtlConnector.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ConnectedEvent,    self.OpenIGTLinkConnected)
+
+                self.oigtlConnector.AddObserver(slicer.vtkMRMLIGTLConnectorNode.DisconnectedEvent, self.OpenIGTLinkDisconnected)
+
+                self.oigtlConnector.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ActivatedEvent,    self.OpenIGTLinkActivated)
+
+                self.oigtlConnector.AddObserver(slicer.vtkMRMLIGTLConnectorNode.DeactivatedEvent,  self.OpenIGTLinkDeactivated)
+
+                self.oigtlConnector.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ReceiveEvent,      self.OpenIGTLinkReceive)
+
+                self.oigtlConnector.AddObserver(slicer.vtkMRMLIGTLConnectorNode.NewDeviceEvent,    self.OpenIGTLinkNewDevice)
+
+                #self.oigtlInitialized = False
+
+            
+
+                #self.numOIGTLConnectorNode = 0;
+
+                slicer.mrmlScene.AddNode(self.oigtlConnector)
+
+                self.oigtlConnector.Start()
+
+            
+
+            node1 = self.scene.GetNodesByName(OIGTL_02_CONNECT_NAME)
+
+            if node1.GetNumberOfItems() == 0:
+
+                self.oigtlConnector1 = slicer.vtkMRMLIGTLConnectorNode()
+
+                self.oigtlConnector1.SetName(OIGTL_02_CONNECT_NAME)
+
+                self.oigtlConnector1.SetTypeServer(OIGTL_02_PORT)
+
+                self.oigtlConnector1.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ConnectedEvent,    self.OpenIGTLinkConnected)
+
+                self.oigtlConnector1.AddObserver(slicer.vtkMRMLIGTLConnectorNode.DisconnectedEvent, self.OpenIGTLinkDisconnected)
+
+                self.oigtlConnector1.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ActivatedEvent,    self.OpenIGTLinkActivated)
+
+                self.oigtlConnector1.AddObserver(slicer.vtkMRMLIGTLConnectorNode.DeactivatedEvent,  self.OpenIGTLinkDeactivated)
+
+                self.oigtlConnector1.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ReceiveEvent,      self.OpenIGTLinkReceive)
+
+                self.oigtlConnector1.AddObserver(slicer.vtkMRMLIGTLConnectorNode.NewDeviceEvent,    self.OpenIGTLinkNewDevice)
+
+                #self.oigtlInitialized = False
+
+                    
+
+                #self.numOIGTLConnectorNode = 0;
+
+                slicer.mrmlScene.AddNode(self.oigtlConnector1)
+
+                self.oigtlConnector1.Start()
+
+
+
+            node2 = self.scene.GetNodesByName(OIGTL_03_CONNECT_NAME)
+
+            if node2.GetNumberOfItems() == 0:
+
+                self.oigtlConnector2 = slicer.vtkMRMLIGTLConnectorNode()
+
+                self.oigtlConnector2.SetName(OIGTL_03_CONNECT_NAME)
+
+                #self.oigtlConnector2.SetTypeServer(OIGTL_03_PORT)
+
+                self.oigtlConnector2.SetTypeClient(OIGTL_03_IP, OIGTL_03_PORT)
+
+                self.oigtlConnector2.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ConnectedEvent,    self.OpenIGTLinkConnected)
+
+                self.oigtlConnector2.AddObserver(slicer.vtkMRMLIGTLConnectorNode.DisconnectedEvent, self.OpenIGTLinkDisconnected)
+
+                self.oigtlConnector2.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ActivatedEvent,    self.OpenIGTLinkActivated)
+
+                self.oigtlConnector2.AddObserver(slicer.vtkMRMLIGTLConnectorNode.DeactivatedEvent,  self.OpenIGTLinkDeactivated)
+
+                self.oigtlConnector2.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ReceiveEvent,      self.OpenIGTLinkReceive)
+
+                self.oigtlConnector2.AddObserver(slicer.vtkMRMLIGTLConnectorNode.NewDeviceEvent,    self.OpenIGTLinkNewDevice)
+
+
+
+                slicer.mrmlScene.AddNode(self.oigtlConnector2)
+
+                self.oigtlConnector2.Start()
+
+
+    def setup(self):
+
+        # Instantiate and connect widgets ...
+
+        
+
+        # Collapsible button for OpenIGTLink Setting
+
+        self.oigtlServerSettingCollapsibleButton = ctk.ctkCollapsibleButton()
+
+        self.oigtlServerSettingCollapsibleButton.text = "OpenIGTLink Setting"
+
+        self.layout.addWidget(self.oigtlServerSettingCollapsibleButton)
+
+                
+
+        # Layout within the OpenIGTLink Setting collapsible button
+
+        self.oigtlServerSettingFormLayout = qt.QFormLayout(self.oigtlServerSettingCollapsibleButton)
+
+        
+
+        # grid
+
+        self.gridSS0 = qt.QGridLayout()
+
+        self.gridSS1 = qt.QGridLayout()
+
+        self.gridSS2 = qt.QGridLayout()
+
+        self.oigtlServerSettingFormLayout.addRow(self.gridSS0)
+
+        self.oigtlServerSettingFormLayout.addRow(self.gridSS1)
+
+        self.oigtlServerSettingFormLayout.addRow(self.gridSS2)
+
+        
+
+        # OpenIGTLink IO Configuration View
+
+        #self.oigtIOConfigurationFrame = qt.QVBoxLayout(self.oigtlServerSettingFormLayout)
+
+        #self.oigtIOConfigurationFrame.setContentsFrameShape(QFrame.StyledPanel)
+
+        #self.oigtIOConfigurationView = slicer.qMRMLIGTLIOTreeView(self.oigtlServerSettingFormLayout)
+
+        #self.oigtIOConfigurationView.setEnabled(true)
+
+        #self.oigtIOConfigurationFrame.addWidget(self.oigtIOConfigurationView)
+
+        
+
+        # OpenIGTLink IO Configuration View
+
+        self.ioConfigurationView = slicer.qMRMLTreeView(self.parent)
+
+        self.ioConfigurationView.setObjectName('IOConfiguration')
+
+        self.ioConfigurationView.setMRMLScene(slicer.mrmlScene)
+
+        self.gridSS0.addWidget(self.ioConfigurationView, 0, 0, 1, 1)
+
+        #self.oigtlServerSettingFormLayout.addWidget(self.ioConfigurationView)
+
+        #self.ioConfigurationView.connect('mrmlSceneChanged(bool)', setMRMLScene)
+
+        #self.ioConfigurationView.sceneModel.setHorizontalHeaderLabels('IO Configuration')
+
+
+
+        # Add vertical spacer
+
+#        self.layout.addStretch(1)
+
+        
+
+        # OpenIGTLink Server Setting button
+
+        self.oigtlServerSettingButton = qt.QPushButton("OpenIGTLink Server Setting")
+
+        self.oigtlServerSettingButton.toolTip = "Server Setting for OpenIGTLink Connection"
+
+        self.gridSS1.addWidget(self.oigtlServerSettingButton, 0, 0, 1, 1)
+
+        #self.oigtlServerSettingFormLayout.addWidget(self.oigtlServerSettingButton)
+
+        self.oigtlServerSettingButton.connect('clicked(bool)', self.onOIGTLServerSettingButtonClicked)
+
+                
+
+        # Add vertical spacer
+
+#        self.layout.addStretch(1)
+
+                
+
+        # Locator Visibility button
+
+        self.oigtlLocatorVisibilityButton = qt.QPushButton("OpenIGTLink Locator Visibility")
+
+        self.oigtlLocatorVisibilityButton.toolTip = "Locator Visibility Setting for Tracking Data from OpenIGTLink Connection"
+
+        self.gridSS2.addWidget(self.oigtlLocatorVisibilityButton, 0, 0, 1, 1)
+
+        #self.oigtlServerSettingFormLayout.addWidget(self.oigtlLocatorVisibilityButton)
+
+        self.oigtlLocatorVisibilityButton.connect('clicked(bool)', self.onOIGTLLocatorVisibilityButtonClicked)
+
+        
+
+        # Virtual Tip Model CheckBox
+
+        self.virtualTipModelCheckBox = qt.QCheckBox("Virtual Tip")
+
+        self.virtualTipModelCheckBox.setChecked(False)
+
+        self.gridSS2.addWidget(self.virtualTipModelCheckBox, 0, 1, 1, 1)
+
+        self.virtualTipModelCheckBox.connect('toggled(bool)', self.onVirtualTipModelCheckBoxChecked)
+
+    
+
+        # US Plane Model CheckBox
+
+        self.USPlaneModelCheckBox = qt.QCheckBox("US Plane")
+
+        self.USPlaneModelCheckBox.setChecked(False)
+
+        self.gridSS2.addWidget(self.USPlaneModelCheckBox, 0, 2, 1, 1)
+
+        self.USPlaneModelCheckBox.connect('toggled(bool)', self.onUSPlaneModelCheckBoxChecked)
+
+        
+
+        # Collasible Button for image Fiducials
+
+        self.imageFiducialsCollapsibleButton = ctk.ctkCollapsibleButton()
+
+        self.imageFiducialsCollapsibleButton.text = "Image Fiducials"
+
+        self.layout.addWidget(self.imageFiducialsCollapsibleButton)
+
+        
+
+        # Layout within the image fiducials collapsible button
+
+        self.imageFiducialFormLayout = qt.QFormLayout(self.imageFiducialsCollapsibleButton)
+
+        
+
+        # grid for image fiducials
+
+        self.gridIF0 = qt.QGridLayout()
+
+        self.gridIF1 = qt.QGridLayout()
+
+        self.gridIF2 = qt.QGridLayout()
+
+        self.imageFiducialFormLayout.addRow(self.gridIF0)
+
+        self.imageFiducialFormLayout.addRow(self.gridIF1)
+
+        self.imageFiducialFormLayout.addRow(self.gridIF2)
+
+        
+
+        # Delete a image fiducial Button
+
+        self.DeleteFiducialButton = qt.QPushButton()
+
+        self.DeleteFiducialButton.setIcon(qt.QIcon(":/Icons/AnnotationDelete.png"))
+
+        self.DeleteFiducialButton.setFlat(True)
+
+        self.DeleteFiducialButton.setMaximumWidth(30)
+
+        self.DeleteFiducialButton.connect('clicked(bool)', self.onDeleteFiducialButtonClicked)
+
+        
+
+        # Table for image fiducials
+
+        self.FiducialTable = qt.QTableWidget()
+
+        self.FiducialTable.setRowCount(1)
+
+        self.FiducialTable.setColumnCount(4)
+
+        self.FiducialTable.setMinimumHeight(90)     # 90: two rows
+
+        self.FiducialTable.verticalHeader().setVisible(False)
+
+        self.FiducialTable.setHorizontalHeaderLabels(['Fiducial Name', 'X', 'Y', 'Z'])
+
+        self.FiducialTable.setColumnWidth(0, 105+20)   # Target Location
+
+        self.FiducialTable.setColumnWidth(1, 110+20)   # X
+
+        self.FiducialTable.setColumnWidth(2, 110+20)   # Y
+
+        self.FiducialTable.setColumnWidth(3, 110+20)   # Z
+
+        self.FiducialTable.connect('cellClicked(int, int)', self.JumpSlicesCallback)
+
+        self.FiducialTable.connect('cellChanged(int, int)', self.TypeFiducialCoordinatesManually)
+
+        
+
+        # Lock a image fiducial Button
+
+        self.LockFiducialButton = qt.QPushButton()
+
+        self.LockFiducialButton.setIcon(qt.QIcon(":/Icons/AnnotationUnlock.png"))
+
+        self.LockFiducialButton.setFlat(True)
+
+        self.LockFiducialButton.setMaximumWidth(30)
+
+        self.fiducialLocked = False
+
+        self.LockFiducialButton.connect('clicked(bool)', self.onLockFiducialButtonClicked)
+
+    
+
+        self.gridIF0.addWidget(self.DeleteFiducialButton, 0, 3, 1, 1)
+
+        self.gridIF1.addWidget(self.FiducialTable, 0, 0, 1, 5)
+
+        self.gridIF2.addWidget(self.LockFiducialButton, 0, 0, 2, 1)
+
+    
+
+        # Collasible Button for tracking Fiducials
+
+        self.trackingFiducialsCollapsibleButton = ctk.ctkCollapsibleButton()
+
+        self.trackingFiducialsCollapsibleButton.text = "Tracking Fiducials"
+
+        self.layout.addWidget(self.trackingFiducialsCollapsibleButton)
+
+    
+
+        # Layout within the tracking fiducials collapsible button
+
+        self.trackingFiducialFormLayout = qt.QFormLayout(self.trackingFiducialsCollapsibleButton)
+
+    
+
+        # grid for tracking fiducials
+
+        self.gridTF0 = qt.QGridLayout()
+
+        self.gridTF1 = qt.QGridLayout()
+
+        self.gridTF2 = qt.QGridLayout()
+
+        self.gridTF3 = qt.QGridLayout()
+
+        self.gridTF4 = qt.QGridLayout()
+
+        self.trackingFiducialFormLayout.addRow(self.gridTF0)
+
+        self.trackingFiducialFormLayout.addRow(self.gridTF1)
+
+        self.trackingFiducialFormLayout.addRow(self.gridTF2)
+
+        self.trackingFiducialFormLayout.addRow(self.gridTF3)
+
+        self.trackingFiducialFormLayout.addRow(self.gridTF4)
+
+    
+
+        # Select a linear transformation for the tracking data
+
+        self.trackingFiducialSelector = qt.QLabel("Tracking Fiducials: ", self.parent)
+
+        self.gridTF0.addWidget(self.trackingFiducialSelector, 0, 0, 1, 1)
+
+        self.trackingFiducialSelector = slicer.qMRMLNodeComboBox(self.parent)
+
+        self.trackingFiducialSelector.nodeTypes = ( ("vtkMRMLLinearTransformNode"), "" )
+
+        self.trackingFiducialSelector.setMRMLScene(self.scene)
+
+        self.trackingFiducialSelector.renameEnabled = True
+
+        self.gridTF0.addWidget(self.trackingFiducialSelector, 0, 1, 1, 1)
+
+        
+
+        # Get a tracking fiducial Button
+
+        self.GetTrackingFiducialButton = qt.QPushButton("Get Tracking Data")
+
+        self.GetTrackingFiducialButton.toolTip = "Getting Tracking Data from OpenIGTLinkIF Module"
+
+        self.GetTrackingFiducialLocked = False
+
+        self.GetTrackingFiducialButton.connect('clicked(bool)', self.onGetTrackingFiducialButtonClicked)
+
+        
+
+        # Delete a tracking fiducial Button
+
+        self.DeleteTrackingFiducialButton = qt.QPushButton()
+
+        self.DeleteTrackingFiducialButton.setIcon(qt.QIcon(":/Icons/AnnotationDelete.png"))
+
+        self.DeleteTrackingFiducialButton.setFlat(True)
+
+        self.DeleteTrackingFiducialButton.setMaximumWidth(30)
+
+        self.DeleteTrackingFiducialButton.connect('clicked(bool)', self.onDeleteTrackingFiducialButtonClicked)
+
+        
+
+        # Tracking Fiducial Table
+
+        self.TrackingFiducialTable = qt.QTableWidget()
+
+        self.TrackingFiducialTable.setRowCount(1)
+
+        self.TrackingFiducialTable.setColumnCount(4)
+
+        self.TrackingFiducialTable.setMinimumHeight(90)     # 90: two rows
+
+        self.TrackingFiducialTable.verticalHeader().setVisible(False)
+
+        self.TrackingFiducialTable.setHorizontalHeaderLabels(['Fiducial Name', 'X', 'Y', 'Z'])
+
+        self.TrackingFiducialTable.setColumnWidth(0, 105+20)   # Target Location
+
+        self.TrackingFiducialTable.setColumnWidth(1, 110+20)   # X
+
+        self.TrackingFiducialTable.setColumnWidth(2, 110+20)   # Y
+
+        self.TrackingFiducialTable.setColumnWidth(3, 110+20)   # Z
+
+        
+
+        # Lock a tracking fiducial Button
+
+        self.LockTrackingFiducialButton = qt.QPushButton()
+
+        self.LockTrackingFiducialButton.setIcon(qt.QIcon(":/Icons/AnnotationUnlock.png"))
+
+        self.LockTrackingFiducialButton.setFlat(True)
+
+        self.LockTrackingFiducialButton.setMaximumWidth(30)
+
+        self.trackingFiducialLocked = False
+
+        self.LockTrackingFiducialButton.connect('clicked(bool)', self.onLockTrackingFiducialButtonClicked)
+
+        
+
+        self.gridTF1.addWidget(self.GetTrackingFiducialButton, 0, 0, 1, 1)
+
+        self.gridTF2.addWidget(self.DeleteTrackingFiducialButton, 0, 3, 1, 1)
+
+        self.gridTF3.addWidget(self.TrackingFiducialTable, 0, 0, 1, 5)
+
+        self.gridTF4.addWidget(self.LockTrackingFiducialButton, 0, 0, 2, 1)
+
+        
+
+    
+
+        # Collapeible Button for Registration
+
+        self.registrationCollapsibleButton = ctk.ctkCollapsibleButton()
+
+        self.registrationCollapsibleButton.text = "Registration"
+
+        self.layout.addWidget(self.registrationCollapsibleButton)
+
+    
+
+        # Layout within the Registration collapsible button
+
+        self.registrationFormLayout = qt.QFormLayout(self.registrationCollapsibleButton)
+
+        
+
+        # grid for the registration
+
+        self.gridReg0 = qt.QGridLayout()
+
+        self.gridReg1 = qt.QGridLayout()
+
+        self.registrationFormLayout.addRow(self.gridReg0)
+
+        self.registrationFormLayout.addRow(self.gridReg1)
+
+        
+
+    
+
+        # Registration Matrix selector
+
+        self.registrationMatrixSelector = qt.QLabel("Registration Matrix: ", self.parent)
+
+        self.gridReg0.addWidget(self.registrationMatrixSelector, 0, 0, 1, 1)
+
+        self.registrationMatrixSelector = slicer.qMRMLNodeComboBox(self.parent)
+
+        self.registrationMatrixSelector.nodeTypes = ( ("vtkMRMLLinearTransformNode"), "" )
+
+        self.registrationMatrixSelector.setMRMLScene(self.scene)
+
+        self.registrationMatrixSelector.renameEnabled = True
+
+        #self.linearTransformSelector.addEnabled = False
+
+        #self.linearTransformSelector.removeEnabled = False
+
+        self.gridReg0.addWidget(self.registrationMatrixSelector, 0, 1, 1, 1)
+
+        
+
+        # Compute Registration Matrix Button
+
+        self.computeRegistrationMatrixButton = qt.QPushButton("Compute Registration Matrix")
+
+        self.computeRegistrationMatrixButton.toolTip = "Computing Registration Matrix for the PA Navigation"
+
+        self.gridReg0.addWidget(self.computeRegistrationMatrixButton, 0, 2, 1, 1)
+
+        self.computeRegistrationMatrixButton.connect('clicked(bool)', self.onComputeRegistrationMatrixButtonClicked)
+
+    
+
+        # Registration Matrix Apply Button
+
+        self.registrationMatrixApplyButton = qt.QPushButton("Apply Registration Matrix")
+
+        self.registrationMatrixApplyButton.toolTip = "Applying Registration Matrix for the PA Navigation"
+
+        self.gridReg1.addWidget(self.registrationMatrixApplyButton, 0, 0, 1, 1)
+
+        self.registrationMatrixApplyButton.connect('clicked(bool)', self.onApplyRegistrationMatrixButtonClicked)
+
+    
+
+        # Add vertical spacer
+
+        #self.layout.addStretch(1)
+
+    
+
+        #self.gridSS0.addWidget(self.oigtlServerSettingButton, 0, 0, 1, 1)
+
+        #self.gridSS0.setSpacing(20)
+
+        #self.gridSS0.addWidget(self.oigtlLocatorVisibilityButton, 0, 1, 1, 1)
+
+        #self.setSpacing(20)
+
+                
+
+        # Set local var as instance attribute
+
+        #oigtLocatorVisibilityButton = oigtLocatorVisibilityButton
+
+            
+
+            
+
+            
+
+    def onOIGTLServerSettingButtonClicked(self):
+
+        #OpenIGTLink Server Setting
+
+        self.numIGTLConnectorNode = self.scene.GetNumberOfNodesByClass('vtkMRMLIGTLConnectorNode')
+
+        if self.numIGTLConnectorNode == 0:
+
+            self.oigtlConnector = slicer.vtkMRMLIGTLConnectorNode()
+
+            self.oigtlConnector.SetName(OIGTL_01_CONNECT_NAME)
+
+            self.oigtlConnector.SetTypeServer(OIGTL_01_PORT)
+
+            self.oigtlConnector.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ConnectedEvent,    self.OpenIGTLinkConnected)
+
+            self.oigtlConnector.AddObserver(slicer.vtkMRMLIGTLConnectorNode.DisconnectedEvent, self.OpenIGTLinkDisconnected)
+
+            self.oigtlConnector.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ActivatedEvent,    self.OpenIGTLinkActivated)
+
+            self.oigtlConnector.AddObserver(slicer.vtkMRMLIGTLConnectorNode.DeactivatedEvent,  self.OpenIGTLinkDeactivated)
+
+            self.oigtlConnector.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ReceiveEvent,      self.OpenIGTLinkReceive)
+
+            self.oigtlConnector.AddObserver(slicer.vtkMRMLIGTLConnectorNode.NewDeviceEvent,    self.OpenIGTLinkNewDevice)
+
+            #self.oigtlInitialized = False
+
+            
+
+            #self.numOIGTLConnectorNode = 0;
+
+            slicer.mrmlScene.AddNode(self.oigtlConnector)
+
+            self.oigtlConnector.Start()
+
+            
+
+            self.oigtlConnector1 = slicer.vtkMRMLIGTLConnectorNode()
+
+            self.oigtlConnector1.SetName(OIGTL_02_CONNECT_NAME)
+
+            self.oigtlConnector1.SetTypeServer(OIGTL_02_PORT)
+
+            self.oigtlConnector1.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ConnectedEvent,    self.OpenIGTLinkConnected)
+
+            self.oigtlConnector1.AddObserver(slicer.vtkMRMLIGTLConnectorNode.DisconnectedEvent, self.OpenIGTLinkDisconnected)
+
+            self.oigtlConnector1.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ActivatedEvent,    self.OpenIGTLinkActivated)
+
+            self.oigtlConnector1.AddObserver(slicer.vtkMRMLIGTLConnectorNode.DeactivatedEvent,  self.OpenIGTLinkDeactivated)
+
+            self.oigtlConnector1.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ReceiveEvent,      self.OpenIGTLinkReceive)
+
+            self.oigtlConnector1.AddObserver(slicer.vtkMRMLIGTLConnectorNode.NewDeviceEvent,    self.OpenIGTLinkNewDevice)
+
+            #self.oigtlInitialized = False
+
+            
+
+            #self.numOIGTLConnectorNode = 0;
+
+            slicer.mrmlScene.AddNode(self.oigtlConnector1)
+
+            self.oigtlConnector1.Start()
+
+            
+
+            self.oigtlConnector2 = slicer.vtkMRMLIGTLConnectorNode()
+
+            self.oigtlConnector2.SetName(OIGTL_03_CONNECT_NAME)
+
+            #self.oigtlConnector2.SetTypeServer(OIGTL_03_PORT)
+
+            self.oigtlConnector2.SetTypeClient(OIGTL_03_IP, OIGTL_03_PORT)
+
+            self.oigtlConnector2.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ConnectedEvent,    self.OpenIGTLinkConnected)
+
+            self.oigtlConnector2.AddObserver(slicer.vtkMRMLIGTLConnectorNode.DisconnectedEvent, self.OpenIGTLinkDisconnected)
+
+            self.oigtlConnector2.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ActivatedEvent,    self.OpenIGTLinkActivated)
+
+            self.oigtlConnector2.AddObserver(slicer.vtkMRMLIGTLConnectorNode.DeactivatedEvent,  self.OpenIGTLinkDeactivated)
+
+            self.oigtlConnector2.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ReceiveEvent,      self.OpenIGTLinkReceive)
+
+            self.oigtlConnector2.AddObserver(slicer.vtkMRMLIGTLConnectorNode.NewDeviceEvent,    self.OpenIGTLinkNewDevice)
+
+            #self.oigtlInitialized = False
+
+            
+
+            #self.numOIGTLConnectorNode = 0;
+
+            slicer.mrmlScene.AddNode(self.oigtlConnector2)
+
+            self.oigtlConnector2.Start()
+
+        else:
+
+            node = self.scene.GetNodesByName(OIGTL_01_CONNECT_NAME)
+
+            if node.GetNumberOfItems() == 0:
+
+                self.oigtlConnector = slicer.vtkMRMLIGTLConnectorNode()
+
+                self.oigtlConnector.SetName(OIGTL_01_CONNECT_NAME)
+
+                self.oigtlConnector.SetTypeServer(OIGTL_01_PORT)
+
+                self.oigtlConnector.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ConnectedEvent,    self.OpenIGTLinkConnected)
+
+                self.oigtlConnector.AddObserver(slicer.vtkMRMLIGTLConnectorNode.DisconnectedEvent, self.OpenIGTLinkDisconnected)
+
+                self.oigtlConnector.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ActivatedEvent,    self.OpenIGTLinkActivated)
+
+                self.oigtlConnector.AddObserver(slicer.vtkMRMLIGTLConnectorNode.DeactivatedEvent,  self.OpenIGTLinkDeactivated)
+
+                self.oigtlConnector.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ReceiveEvent,      self.OpenIGTLinkReceive)
+
+                self.oigtlConnector.AddObserver(slicer.vtkMRMLIGTLConnectorNode.NewDeviceEvent,    self.OpenIGTLinkNewDevice)
+
+                #self.oigtlInitialized = False
+
+                
+
+                #self.numOIGTLConnectorNode = 0;
+
+                slicer.mrmlScene.AddNode(self.oigtlConnector)
+
+                self.oigtlConnector.Start()
+
+            
+
+            node1 = self.scene.GetNodesByName(OIGTL_02_CONNECT_NAME)
+
+            if node1.GetNumberOfItems() == 0:
+
+                self.oigtlConnector1 = slicer.vtkMRMLIGTLConnectorNode()
+
+                self.oigtlConnector1.SetName(OIGTL_02_CONNECT_NAME)
+
+                self.oigtlConnector1.SetTypeServer(OIGTL_02_PORT)
+
+                self.oigtlConnector1.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ConnectedEvent,    self.OpenIGTLinkConnected)
+
+                self.oigtlConnector1.AddObserver(slicer.vtkMRMLIGTLConnectorNode.DisconnectedEvent, self.OpenIGTLinkDisconnected)
+
+                self.oigtlConnector1.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ActivatedEvent,    self.OpenIGTLinkActivated)
+
+                self.oigtlConnector1.AddObserver(slicer.vtkMRMLIGTLConnectorNode.DeactivatedEvent,  self.OpenIGTLinkDeactivated)
+
+                self.oigtlConnector1.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ReceiveEvent,      self.OpenIGTLinkReceive)
+
+                self.oigtlConnector1.AddObserver(slicer.vtkMRMLIGTLConnectorNode.NewDeviceEvent,    self.OpenIGTLinkNewDevice)
+
+                #self.oigtlInitialized = False
+
+                
+
+                #self.numOIGTLConnectorNode = 0;
+
+                slicer.mrmlScene.AddNode(self.oigtlConnector1)
+
+                self.oigtlConnector1.Start()
+
+            
+
+            node2 = self.scene.GetNodesByName(OIGTL_03_CONNECT_NAME)
+
+            if node2.GetNumberOfItems() == 0:
+
+                self.oigtlConnector2 = slicer.vtkMRMLIGTLConnectorNode()
+
+                self.oigtlConnector2.SetName(OIGTL_03_CONNECT_NAME)
+
+                #self.oigtlConnector2.SetTypeServer(OIGTL_03_PORT)
+
+                self.oigtlConnector2.SetTypeClient(OIGTL_03_IP, OIGTL_03_PORT)
+
+                self.oigtlConnector2.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ConnectedEvent,    self.OpenIGTLinkConnected)
+
+                self.oigtlConnector2.AddObserver(slicer.vtkMRMLIGTLConnectorNode.DisconnectedEvent, self.OpenIGTLinkDisconnected)
+
+                self.oigtlConnector2.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ActivatedEvent,    self.OpenIGTLinkActivated)
+
+                self.oigtlConnector2.AddObserver(slicer.vtkMRMLIGTLConnectorNode.DeactivatedEvent,  self.OpenIGTLinkDeactivated)
+
+                self.oigtlConnector2.AddObserver(slicer.vtkMRMLIGTLConnectorNode.ReceiveEvent,      self.OpenIGTLinkReceive)
+
+                self.oigtlConnector2.AddObserver(slicer.vtkMRMLIGTLConnectorNode.NewDeviceEvent,    self.OpenIGTLinkNewDevice)
+
+                
+
+                slicer.mrmlScene.AddNode(self.oigtlConnector2)
+
+                self.oigtlConnector2.Start()
+
+
+
+
+
+    def onOIGTLLocatorVisibilityButtonClicked(self):
+
+        collectNode = self.scene.GetNodesByName(OIGTL_01_CONNECT_NAME)             # vtkCollection
+
+        if collectNode.GetNumberOfItems() == 1:
+
+            oigtlConnectorNode = collectNode.GetItemAsObject(0)                     # vtkMRMLIGTLConnectorNode
+
+            linearTransformNode = oigtlConnectorNode.GetIncomingMRMLNode(0)         # vtkMRMLLinearTransformNode
+
+            oigtlLogic = slicer.modules.openigtlinkif.logic()                       # vtkSlicerOpenIGTLinkIFLogic
+
+            oigtlTransform = oigtlLogic.GetConverter(0)                             # vtkIGTLToMRMLLinearTransform
+
+            #oigtlTransform.SetVisibility(1, slicer.mrmlScene, linearTransformNode)
+
+            
+
+            #self.onCreateLocatorModel('locator', 0, 1, 1)
+
+            
+
+            locatorModelNode = slicer.vtkMRMLModelNode()
+
+            locatorDisplayNode = slicer.vtkMRMLModelDisplayNode()
+
+        
+
+            # Cylinder represents the locator stick
+
+            cylinder = vtk.vtkCylinderSource()
+
+            cylinder.SetRadius(1.5)
+
+            cylinder.SetHeight(100)
+
+            cylinder.SetCenter(0, 0, 0)
+
+            cylinder.Update()
+
+        
+
+            # Rotate cylinder
+
+            tfilter = vtk.vtkTransformPolyDataFilter()
+
+            trans = vtk.vtkTransform()
+
+            #trans.RotateX(90.0);
+
+            trans.Translate(0.0, -50.0, 0.0)
+
+            trans.Update()
+
+            tfilter.SetInputConnection(cylinder.GetOutputPort())
+
+            tfilter.SetTransform(trans)
+
+            tfilter.Update()
+
+        
+
+            # Sphere represents the locator tip
+
+            sphere = vtk.vtkSphereSource()
+
+            sphere.SetRadius(3.0)
+
+            sphere.SetCenter(0, 0, 0)
+
+            sphere.Update()
+
+            
+
+            # Loading STL Model of Ultrasound Transducer
+
+            filename = "/Users/sungminkim/Documents/Data/L14-5W_60/L14-5W_60_1.STL"
+
+            reader = vtk.vtkSTLReader()
+
+            reader.SetFileName(filename)
+
+        
+
+            apd = vtk.vtkAppendPolyData()
+
+            apd.AddInput(sphere.GetOutput())
+
+            #apd.AddInput(tfilter.GetOutput())
+
+            apd.AddInput(reader.GetOutput())
+
+            apd.Update()
+
+        
+
+            locatorModelNode.SetAndObservePolyData(apd.GetOutput())
+
+        
+
+            color = [1, 0, 1]
+
+            #locatorDisp.SetPolyData(locatorModelNode.GetPolyData())
+
+            locatorDisplayNode.SetColor(color)
+
+        
+
+            slicer.mrmlScene.SaveStateForUndo()
+
+            slicer.mrmlScene.AddNode(locatorDisplayNode)
+
+            lm = slicer.mrmlScene.AddNode(locatorModelNode)
+
+            locatorDisplayNode.SetScene(slicer.mrmlScene)
+
+            locatorModelNode.SetName('Locator_DataTransfer_Probe_0')
+
+            locatorModelNode.SetScene(slicer.mrmlScene)
+
+            locatorModelNode.SetAndObserveDisplayNodeID(locatorDisplayNode.GetID())
+
+            locatorModelNode.SetHideFromEditors(0)
+
+            locatorModelNode.SetAndObserveTransformNodeID(linearTransformNode.GetID())
+
+            locatorModelNode.InvokeEvent(slicer.vtkMRMLTransformableNode.TransformModifiedEvent)
+
+            
+
+            
+
+            # 3D model for US Image Plane
+
+            self.usPlaneShape = vtk.vtkCubeSource()
+
+            self.usPlaneShape.SetXLength(66.0)
+
+            self.usPlaneShape.SetYLength(200.0)
+
+            self.usPlaneShape.SetZLength(6.0)
+
+            self.usPlaneShape.SetCenter(0, 0, 0)
+
+            self.usPlaneShape.Update()
+
+            
+
+            self.usPlane = vtk.vtkTransformPolyDataFilter()
+
+            self.usPlaneTrans = vtk.vtkTransform()
+
+            self.usPlaneTrans.Translate(-33.0, 100.0, 0.0)
+
+            self.usPlaneTrans.Update()
+
+            self.usPlane.SetInputConnection(self.usPlaneShape.GetOutputPort())
+
+            self.usPlane.SetTransform(self.usPlaneTrans)
+
+            self.usPlane.Update()
+
+            
+
+            self.cleaner = vtk.vtkTriangleFilter()
+
+            self.cleaner.SetInputConnection(self.usPlane.GetOutputPort())
+
+            self.cleaner.Update()
+
+            
+
+            #self.usPlaneShape = vtk.vtkCubeSource()
+
+            #self.usPlaneShape.SetXLength(80.0)
+
+            #self.usPlaneShape.SetYLength(100.0)
+
+            #self.usPlaneShape.SetZLength(10.0)
+
+            #self.usPlaneShape.SetCenter(0, 0, 0)
+
+            #self.usPlaneShape.Update()
+
+            
+
+            #self.usPlane = vtk.vtkTransformPolyDataFilter()
+
+            #self.usPlaneTrans = vtk.vtkTransform()
+
+            #self.usPlaneTrans.RotateZ(-30.0)
+
+            #self.usPlaneTrans.Translate(0.0, 50.0, 0.0)
+
+            #self.usPlaneTrans.Update()
+
+            #self.usPlane.SetInputConnection(self.usPlaneShape.GetOutputPort())
+
+            #self.usPlane.SetTransform(self.usPlaneTrans)
+
+            #self.usPlane.Update()
+
+            
+
+            #self.extrusionFilter = vtk.vtkRotationalExtrusionFilter()
+
+            #self.extrusionFilter.SetAngle(60.0)
+
+            #self.extrusionFilter.SetInputConnection(self.usPlane.GetOutputPort())
+
+            #self.extrusionFilter.Update()
+
+            
+
+            #self.cleaner = vtk.vtkTriangleFilter()
+
+            #self.cleaner.SetInputConnection(self.extrusionFilter.GetOutputPort())
+
+            #self.cleaner.Update()
+
+            
+
+            self.displayNode = slicer.vtkMRMLModelDisplayNode()
+
+            self.displayNode.SetScene(slicer.mrmlScene)
+
+            self.displayNode.SetColor(1.0, 0.5, 0.5)
+
+            self.displayNode.SetOpacity(0.7)
+
+            self.displayNode.VisibilityOn()
+
+            self.displayNode.SliceIntersectionVisibilityOn()
+
+            
+
+            slicer.mrmlScene.AddNode(self.displayNode)
+
+            
+
+            self.modelNode = slicer.vtkMRMLModelNode()
+
+            self.modelNode.SetName("US Plane")
+
+            self.modelNode.SetScene(slicer.mrmlScene)
+
+            self.modelNode.SetHideFromEditors(0)
+
+            self.modelNode.SetAndObservePolyData(self.cleaner.GetOutput())
+
+            self.modelNode.SetAndObserveTransformNodeID(linearTransformNode.GetID())
+
+            self.modelNode.InvokeEvent(slicer.vtkMRMLTransformableNode.TransformModifiedEvent)
+
+            
+
+            if self.displayNode.GetID():
+
+                self.modelNode.SetAndObserveDisplayNodeID(self.displayNode.GetID())
+
+                slicer.mrmlScene.AddNode(self.modelNode)
+
+            else:
+
+                print 'US Plane does not yet have ID'
+
+            
+
+            
+
+            self.USPlaneModelCheckBox.setChecked(True)
+
+    
+
+        
+
+        collectNode = self.scene.GetNodesByName(OIGTL_02_CONNECT_NAME)             # vtkCollection
+
+        if collectNode.GetNumberOfItems() == 1:
+
+            oigtlConnectorNode = collectNode.GetItemAsObject(0)                     # vtkMRMLIGTLConnectorNode
+
+            linearTransformNode = oigtlConnectorNode.GetIncomingMRMLNode(0)         # vtkMRMLLinearTransformNode
+
+            oigtlLogic = slicer.modules.openigtlinkif.logic()                       # vtkSlicerOpenIGTLinkIFLogic
+
+            oigtlTransform = oigtlLogic.GetConverter(0)                             # vtkIGTLToMRMLLinearTransform
+
+        
+
+            #oigtlTransform.SetVisibility(1, slicer.mrmlScene, linearTransformNode)
+
+            
+
+            #self.onCreateLocatorModel('locator', 0, 1, 1)
+
+            
+
+            locatorModelNode = slicer.vtkMRMLModelNode()
+
+            locatorDisplayNode = slicer.vtkMRMLModelDisplayNode()
+
+            
+
+            # Cylinder represents the locator stick
+
+            cylinder = vtk.vtkCylinderSource()
+
+            cylinder.SetRadius(1.5)
+
+            cylinder.SetHeight(100)
+
+            cylinder.SetCenter(0, 0, 0)
+
+            cylinder.Update()
+
+            
+
+            # Rotate cylinder
+
+            tfilter = vtk.vtkTransformPolyDataFilter()
+
+            trans = vtk.vtkTransform()
+
+            #trans.RotateX(90.0);
+
+            trans.Translate(0.0, -50.0, 0.0)
+
+            trans.Update()
+
+            tfilter.SetInputConnection(cylinder.GetOutputPort())
+
+            tfilter.SetTransform(trans)
+
+            tfilter.Update()
+
+            
+
+            # Sphere represents the locator tip
+
+            sphere = vtk.vtkSphereSource()
+
+            sphere.SetRadius(3.0)
+
+            sphere.SetCenter(0, 0, 0)
+
+            sphere.Update()
+
+            
+
+            apd = vtk.vtkAppendPolyData()
+
+            apd.AddInput(sphere.GetOutput())
+
+            apd.AddInput(tfilter.GetOutput())
+
+            apd.Update()
+
+            
+
+            locatorModelNode.SetAndObservePolyData(apd.GetOutput())
+
+            
+
+            color = [0, 1, 1]
+
+            #locatorDisp.SetPolyData(locatorModelNode.GetPolyData())
+
+            locatorDisplayNode.SetColor(color)
+
+            
+
+            slicer.mrmlScene.SaveStateForUndo()
+
+            slicer.mrmlScene.AddNode(locatorDisplayNode)
+
+            lm = slicer.mrmlScene.AddNode(locatorModelNode)
+
+            locatorDisplayNode.SetScene(slicer.mrmlScene)
+
+            locatorModelNode.SetName('Locator_DataTransfer_Probe_1')
+
+            locatorModelNode.SetScene(slicer.mrmlScene)
+
+            locatorModelNode.SetAndObserveDisplayNodeID(locatorDisplayNode.GetID())
+
+            locatorModelNode.SetHideFromEditors(0)
+
+            locatorModelNode.SetAndObserveTransformNodeID(linearTransformNode.GetID())
+
+            locatorModelNode.InvokeEvent(slicer.vtkMRMLTransformableNode.TransformModifiedEvent)
+
+            
+
+            # 3D Model for Virtual Tip (Laser tip of Photo-acoustic Imaging)
+
+            self.laserModelNode = slicer.vtkMRMLModelNode()
+
+            self.laserDisplayNode = slicer.vtkMRMLModelDisplayNode()
+
+            
+
+            laserCylinder = vtk.vtkCylinderSource()
+
+            laserCylinder.SetRadius(1.5)
+
+            laserCylinder.SetHeight(200)
+
+            laserCylinder.SetCenter(0, 0, 0)
+
+            laserCylinder.Update()
+
+            
+
+            # Rotate cylinder
+
+            laserTfilter = vtk.vtkTransformPolyDataFilter()
+
+            laserTrans = vtk.vtkTransform()
+
+            #trans.RotateX(90.0);
+
+            laserTrans.Translate(0.0, 100.0, 0.0)
+
+            laserTrans.Update()
+
+            laserTfilter.SetInputConnection(laserCylinder.GetOutputPort())
+
+            laserTfilter.SetTransform(laserTrans)
+
+            laserTfilter.Update()
+
+            
+
+            laserAPD = vtk.vtkAppendPolyData()
+
+            laserAPD.AddInput(laserTfilter.GetOutput())
+
+            laserAPD.Update()
+
+            
+
+            self.laserModelNode.SetAndObservePolyData(laserAPD.GetOutput())
+
+            
+
+            color = [1, 1, 0]
+
+            #locatorDisp.SetPolyData(locatorModelNode.GetPolyData())
+
+            self.laserDisplayNode.SetColor(color)
+
+            self.laserDisplayNode.SetOpacity(0.7)
+
+            self.laserDisplayNode.VisibilityOn()
+
+            self.laserDisplayNode.SliceIntersectionVisibilityOn()
+
+            
+
+            slicer.mrmlScene.SaveStateForUndo()
+
+            slicer.mrmlScene.AddNode(self.laserDisplayNode)
+
+            lm = slicer.mrmlScene.AddNode(self.laserModelNode)
+
+            self.laserDisplayNode.SetScene(slicer.mrmlScene)
+
+            self.laserModelNode.SetName('Laser Virtual Tip')
+
+            self.laserModelNode.SetScene(slicer.mrmlScene)
+
+            self.laserModelNode.SetAndObserveDisplayNodeID(self.laserDisplayNode.GetID())
+
+            self.laserModelNode.SetHideFromEditors(0)
+
+            self.laserModelNode.SetAndObserveTransformNodeID(linearTransformNode.GetID())
+
+            self.laserModelNode.InvokeEvent(slicer.vtkMRMLTransformableNode.TransformModifiedEvent)
+
+            
+
+            self.virtualTipModelCheckBox.setChecked(True)
+
+
+
+
+
+        collectNode = self.scene.GetNodesByName('PhotoacousticImage')       # vtkCollection
+
+        scalarVolumeTransformNode = collectNode.GetItemAsObject(0)                   # vtkMRMLScalarVolumeNode
+
+        
+
+        node = self.scene.GetNodesByName(OIGTL_03_DEVICE_NAME)                    # vtkCollection
+
+        scalarVolumeNode = node.GetItemAsObject(0)                                # vtkMRMLScalarVolumeNode
+
+        scalarVolumeNode.SetAndObserveTransformNodeID(scalarVolumeTransformNode.GetID())
+
+        
+
+        collectNode = self.scene.GetNodesByName(OIGTL_01_DEVICE_NAME)  # vtkCollector
+
+        transformNode = collectNode.GetItemAsObject(0)                  # vtkMRMLLinearTransformNode
+
+        
+
+        scalarVolumeTransformNode.SetAndObserveTransformNodeID(transformNode.GetID())
+
+        scalarVolumeTransformNode.InvokeEvent(slicer.vtkMRMLTransformableNode.TransformModifiedEvent)
+
+        volumerenderingLogic = slicer.modules.volumerendering.logic()
+
+        volumeDisplayNode = self.scene.CreateNodeByClass('vtkMRMLGPURayCastVolumeRenderingDisplayNode')
+
+        self.scene.AddNode(volumeDisplayNode)
+
+        volumeDisplayNode.UnRegister(volumerenderingLogic)
+
+        volumerenderingLogic.UpdateDisplayNodeFromVolumeNode(volumeDisplayNode, scalarVolumeNode)
+
+        scalarVolumeNode.AddAndObserveDisplayNodeID(volumeDisplayNode.GetID())
+
+
+
+        collectNode = self.scene.GetNodesByClass('vtkMRMLVolumePropertyNode')
+
+        if collectNode.GetNumberOfItems() == 1:
+
+            volumePropertyNode = collectNode.GetItemAsObject(0)
+
+            
+
+            oTFun = vtk.vtkPiecewiseFunction()
+
+            oTFun.AddSegment(0, 1.0, 256, 1.0)
+
+            
+
+            cTFun = vtk.vtkColorTransferFunction()
+
+            cTFun.AddRGBPoint(0, 0.0, 0.0, 0.0)
+
+            cTFun.AddRGBPoint(255, 1.0, 1.0, 1.0)
+
+                
+
+            volumePropertyNode.SetScalarOpacity(oTFun)
+
+            volumePropertyNode.SetColor(cTFun)
+
+
+
+
+
+
+
+    #def onCreateLocatorModel(self, name, r, g, b):
+
+
+
+
+
+    def onVirtualTipModelCheckBoxChecked(self):
+
+        if self.laserDisplayNode:
+
+            if self.virtualTipModelCheckBox.checkState():
+
+                self.laserDisplayNode.SliceIntersectionVisibilityOn()
+
+                self.laserDisplayNode.VisibilityOn()
+
+            else:
+
+                self.laserDisplayNode.VisibilityOff()
+
+                self.laserDisplayNode.SliceIntersectionVisibilityOff()
+
+
+
+
+
+    def onUSPlaneModelCheckBoxChecked(self):
+
+        if self.displayNode:
+
+            if self.USPlaneModelCheckBox.checkState():
+
+                self.displayNode.SliceIntersectionVisibilityOn()
+
+                self.displayNode.VisibilityOn()
+
+            else:
+
+                self.displayNode.VisibilityOff()
+
+                self.displayNode.SliceIntersectionVisibilityOff()
+
+
+
+
+
+    # Lock / Unlock fiducial list to send the coordinates to SARRP software.
+
+    # Do we really need this functionality? It doesn't seem...
+
+    def onLockFiducialButtonClicked(self):
+
+        if self.fiducialLocked == False:
+
+            self.LockFiducialButton.setIcon(qt.QIcon(":/Icons/AnnotationLock.png"))
+
+            self.fiducialLocked = True
+
+        else:
+
+            self.LockFiducialButton.setIcon(qt.QIcon(":/Icons/AnnotationUnlock.png"))
+
+            self.fiducialLocked = False
+
+
+
+    def onDeleteFiducialButtonClicked(self):
+
+        self.ModifyingFiducial = True
+
+    
+
+        index = self.FiducialTable.currentIndex().row()
+
+        if index < 0:
+
+            self.ErrorDialog("Select a target that you want to delete.")
+
+            return
+
+
+
+        self.MarkupsNode.RemoveMarkup(index)
+
+        for j in range(4):
+
+            self.FiducialTable.takeItem(index, j)
+
+        self.fiducialWidgetItems.pop(index)
+
+        self.FiducialTable.removeRow(index)
+
+
+
+        num = self.MarkupsNode.GetNumberOfFiducials()
+
+        for j in range(num):
+
+            self.MarkupsNode.SetNthMarkupLabel(j, "ImageFiducial" + str(j))
+
+        
+
+        # Update all the fiducials' coordinates
+
+        for i in range(self.MarkupsNode.GetNumberOfFiducials()):
+
+            fiducialName = self.MarkupsNode.GetNthMarkupLabel(i)
+
+            item = self.FiducialTable.item(i,0)
+
+            if item:
+
+                item.setText(fiducialName)
+
+            else:
+
+                print 'ImageFiducial ', i, '(', fiducialName, '), column 0 not yet initialized'
+
+            coord = [0, 0, 0]
+
+            self.MarkupsNode.GetNthFiducialPosition(i,coord)
+
+            for j in range(3):
+
+                item = self.FiducialTable.item(i,j+1)
+
+                if item:
+
+                    item.setText('%.2f' % coord[j])
+
+                else:
+
+                    print 'ImageFiducial ', i, '(', fiducialName, '), column ', j, ' not yet initialized'
+
+        
+
+        self.ModifyingFiducial = False
+
+
+
+
+    # Jump to the intersection point (isocenter) on three 2D viewers
+
+    def JumpSlicesCallback(self, row, column):
+
+        numIsocenters = self.MarkupsNode.GetNumberOfFiducials()
+
+        if row >= numIsocenters:
+
+            return
+
+        if column != 0:
+
+            print "Do not jump!"
+
+            return
+
+        xyz = [0,0,0]
+
+        self.MarkupsNode.GetNthFiducialPosition(row, xyz)
+
+        numNodes = self.scene.GetNumberOfNodesByClass("vtkMRMLSliceNode")
+
+        for i in range(numNodes):
+
+            node = self.scene.GetNthNodeByClass(i, 'vtkMRMLSliceNode')
+
+            node.JumpSlice(xyz[0], xyz[1], xyz[2])
+
+
+
+    # When user types a new number for X, Y, or Z, update the fiducial.
+
+    def TypeFiducialCoordinatesManually(self, row, column):
+
+        if self.ModifyingFiducial:
+
+            return
+
+        fiducialItem = self.FiducialTable.item(row,column)
+
+        if not fiducialItem:
+
+            print 'FiducialTable does not have entry at ', row, ', ', column
+
+            return
+
+        # Do nothing when trying to change fiducial name
+
+        numIsocenters = self.MarkupsNode.GetNumberOfFiducials()
+
+        if row >= numIsocenters:
+
+            print 'TypeFiducialCoordinatesManually: row = ', row, ', numIsocenters = ', numIsocenters
+
+            return
+
+        if column == 0:
+
+            # Bring the fiducial's name back.
+
+            fiducialItem.setText(self.MarkupsNode.GetNthMarkupLabel(row))
+
+            return
+
+        # Make sure whether the typed number can be casted to float
+
+        try:
+
+            newXYZ = float(fiducialItem.text())
+
+        except ValueError, e:
+
+            self.ErrorDialog("Enter a number for new coordinates.")
+
+            # Bring the original value back.
+
+            xyz = [0,0,0]
+
+            self.MarkupsNode.GetNthFiducialPosition(row, xyz)
+
+            fiducialItem.setText('%.2f' % xyz[column-1])
+
+            return
+
+        # Retrieve the fiducial's coordinates
+
+        xyz = [0,0,0]
+
+        self.MarkupsNode.GetNthFiducialPosition(row, xyz)
+
+        # Update the fiducial's coordinates to new value
+
+        if column == 1:
+
+            self.MarkupsNode.SetNthFiducialPosition(row, newXYZ, xyz[1], xyz[2])
+
+        elif column == 2:
+
+            self.MarkupsNode.SetNthFiducialPosition(row, xyz[0], newXYZ, xyz[2])
+
+        else:
+
+            self.MarkupsNode.SetNthFiducialPosition(row, xyz[0], xyz[1], newXYZ)
+
+        # Jump to the new coordinates on three 2D viewers
+
+        self.JumpSlicesCallback(row, 0)
+
+
+
+    # When a node is removed from the scene,
+
+    #def NodeRemoveEvent(self, caller, event):
+
+    #    print "Node remove event is evoked."
+
+
+
+    # This is called when a new fiducial has been detected by vtkMRMLMarkupsFiducialNode.
+
+    def FiducialAdded(self, caller, event):
+
+        # caller: vtkMRMLMarkupsFiducialNode2 (node for ImageFiducials)
+
+        
+
+        self.ModifyingFiducial = True
+
+        numFiducials = caller.GetNumberOfFiducials()
+
+        
+
+        print caller.GetID()
+
+        
+
+        fiducialName = "ImageFiducial" + str(numFiducials-1)
+
+        fiducialIndex = numFiducials-1
+
+        caller.SetNthMarkupLabel(fiducialIndex, fiducialName)
+
+        
+
+        # Adjust the size of text and glyph (e.g. 'IsoC'). The default size is too big.
+
+#        caller.GetMarkupsDisplayNode().SetTextScale(3.0)
+
+#        caller.GetMarkupsDisplayNode().SetGlyphScale(3.0)  # default size: 5.0
+
+        coord = [0, 0, 0]
+
+        caller.GetNthFiducialPosition(fiducialIndex, coord)
+
+        
+
+        # Now, set the Qt Widget Items for the new fiducial
+
+        if self.FiducialTable.rowCount <= fiducialIndex:
+
+            self.FiducialTable.insertRow(fiducialIndex)
+
+        tempItem = []
+
+        fiducialNameItem = qt.QTableWidgetItem(fiducialName)
+
+        fiducialNameItem.setTextAlignment(qt.Qt.AlignCenter)
+
+        self.FiducialTable.setItem(fiducialIndex, 0, fiducialNameItem)
+
+        tempItem.append(fiducialNameItem)
+
+        for j in range(3):
+
+            fiducialCoordItem = qt.QTableWidgetItem('%.2f' % coord[j])
+
+            fiducialCoordItem.setTextAlignment(qt.Qt.AlignRight | qt.Qt.AlignVCenter)
+
+            self.FiducialTable.setItem(fiducialIndex, j+1, fiducialCoordItem)
+
+            tempItem.append(fiducialCoordItem)
+
+        self.fiducialWidgetItems.append(tempItem)
+
+        # Initialize the prescribed dose to 100
+
+#        self.dictIsoToDose[fiducialName] = 100
+
+        # Initialize the ROI
+
+        if fiducialName == 'IsoC':
+
+            self.RoiNode.SetXYZ(self.RetrieveFiducialCoordinatesByName('IsoC'))
+
+        self.FiducialTable.selectRow(fiducialIndex)
+
+        self.ModifyingFiducial = False
+
+
+
+    def FiducialModified(self, caller, event):
+
+        # caller: vtkMRMLMarkupsFiducialNode2
+
+        
+
+        self.ModifyingFiducial = True
+
+        # Update all the fiducials' coordinates
+
+        for i in range(self.MarkupsNode.GetNumberOfFiducials()):
+
+            fiducialName = caller.GetNthMarkupLabel(i)
+
+            item = self.FiducialTable.item(i,0)
+
+            if item:
+
+                item.setText(fiducialName)
+
+            else:
+
+                print 'Fiducial ', i, '(', fiducialName, '), column 0 not yet initialized'
+
+            coord = [0, 0, 0]
+
+            caller.GetNthFiducialPosition(i,coord)
+
+            for j in range(3):
+
+                item = self.FiducialTable.item(i,j+1)
+
+                if item:
+
+                    item.setText('%.2f' % coord[j])
+
+                else:
+
+                    print 'Fiducial ', i, '(', fiducialName, '), column ', j, ' not yet initialized'
+
+            # Update the ROI center if the fiducial has changed
+
+            if fiducialName == 'IsoC':
+
+                self.RoiNode.SetXYZ(coord)
+
+        # Jump to the new coordinates on three 2D viewers
+
+        row = self.FiducialTable.currentRow()
+
+        if row >= 0:
+
+            self.JumpSlicesCallback(row, 0)
+
+        self.ModifyingFiducial = False
+
+
+
+    def FiducialDeleted(self, caller, event):
+
+        # caller: vtkMRMLMarkupsFiducialNode2
+
+        # event: NoEvent
+
+        node = self.scene.GetNodesByName('ImageFiducials')
+
+        caller = node.GetItemAsObject(0)
+
+        
+
+        print "The selected fiducial is deleted."
+
+    
+
+    # Lock / Unlock fiducial list to send the coordinates to SARRP software.
+
+    # Do we really need this functionality? It doesn't seem...
+
+    def onLockTrackingFiducialButtonClicked(self):
+
+        if self.trackingFiducialLocked == False:
+
+            self.LockTrackingFiducialButton.setIcon(qt.QIcon(":/Icons/AnnotationLock.png"))
+
+            self.trackingFiducialLocked = True
+
+        else:
+
+            self.LockTrackingFiducialButton.setIcon(qt.QIcon(":/Icons/AnnotationUnlock.png"))
+
+            self.trackingFiducialLocked = False
+
+
+
+    # Delete selected fiducial
+
+    def onDeleteTrackingFiducialButtonClicked(self):
+
+        ModifyingTrackingFiducial = True
+
+        
+
+        index = self.TrackingFiducialTable.currentIndex().row()
+
+        if index < 0:
+
+            self.ErrorDialog("Select a target that you want to delete.")
+
+            return
+
+        
+
+        self.MarkupsTrackingNode.RemoveMarkup(index)
+
+        for j in range(4):
+
+            self.TrackingFiducialTable.takeItem(index, j)
+
+        self.trackingFiducialWidgetItems.pop(index)
+
+        self.TrackingFiducialTable.removeRow(index)
+
+
+
+        num = self.MarkupsTrackingNode.GetNumberOfFiducials()
+
+        for j in range(num):
+
+            self.MarkupsTrackingNode.SetNthMarkupLabel(j, "TrackingFiducial" + str(j))
+
+        
+
+        # Update all the fiducials' coordinates
+
+        for i in range(self.MarkupsTrackingNode.GetNumberOfFiducials()):
+
+            fiducialName = self.MarkupsTrackingNode.GetNthMarkupLabel(i)
+
+            item = self.TrackingFiducialTable.item(i,0)
+
+            if item:
+
+                item.setText(fiducialName)
+
+            else:
+
+                print 'TrackingFiducial ', i, '(', fiducialName, '), column 0 not yet initialized'
+
+            coord = [0, 0, 0]
+
+            self.MarkupsTrackingNode.GetNthFiducialPosition(i,coord)
+
+            for j in range(3):
+
+                item = self.TrackingFiducialTable.item(i,j+1)
+
+                if item:
+
+                    item.setText('%.2f' % coord[j])
+
+                else:
+
+                    print 'TrackingFiducial ', i, '(', fiducialName, '), column ', j, ' not yet initialized'
+
+
+
+        ModifyingTrackingFiducial = False
+
+
+
+    # Get Tracking data from OpenIGTLinkIF module
+
+    def onGetTrackingFiducialButtonClicked(self):
+
+        selectedNode = self.trackingFiducialSelector.currentNode()
+
+        transform = selectedNode.GetMatrixTransformToParent()
+
+    
+
+        self.ModifyingTrackingFiducial = True
+
+        
+
+        # Get the number of the fiducials and set the name of the fiducials
+
+        numTrackingFiducials =  self.MarkupsTrackingNode.GetNumberOfFiducials()
+
+        fiducialName = "TrackingFiducial" + str(numTrackingFiducials)
+
+        fiducialIndex = numTrackingFiducials
+
+        
+
+        # Add fiducial and modify label of the fiducial
+
+        self.MarkupsTrackingNode.AddFiducial(transform.GetElement(0, 3), transform.GetElement(1,3), transform.GetElement(2,3))
+
+        self.MarkupsTrackingNode.SetNthMarkupLabel(fiducialIndex, fiducialName)
+
+    
+
+        # Now, set the Qt Widget Items for the new fiducial
+
+        if self.TrackingFiducialTable.rowCount <= fiducialIndex:
+
+            self.TrackingFiducialTable.insertRow(fiducialIndex)
+
+        tempItem = []
+
+        fiducialNameItem = qt.QTableWidgetItem(fiducialName)
+
+        fiducialNameItem.setTextAlignment(qt.Qt.AlignCenter)
+
+        self.TrackingFiducialTable.setItem(fiducialIndex, 0, fiducialNameItem)
+
+        tempItem.append(fiducialNameItem)
+
+        coord = [transform.GetElement(0, 3), transform.GetElement(1,3), transform.GetElement(2,3)]
+
+        for j in range(3):
+
+            fiducialCoordItem = qt.QTableWidgetItem('%.2f' % coord[j])
+
+            fiducialCoordItem.setTextAlignment(qt.Qt.AlignRight | qt.Qt.AlignVCenter)
+
+            self.TrackingFiducialTable.setItem(fiducialIndex, j+1, fiducialCoordItem)
+
+            tempItem.append(fiducialCoordItem)
+
+        self.trackingFiducialWidgetItems.append(tempItem)
+
+        self.TrackingFiducialTable.selectRow(fiducialIndex)
+
+        self.ModifyingTrackingFiducial = False
+
+
+
+    # Actually we don't need "ValueModifiedEvent" since the information will be retrieved while building JSON.
+
+    def RoiValudeModified(self, caller, event):
+
+        radius = [0, 0, 0]
+
+        self.RoiNode.GetRadiusXYZ(radius)
+
+        xyz = [0, 0, 0]
+
+        self.RoiNode.GetXYZ(xyz)
+
+
+
+    def onComputeRegistrationMatrixButtonClicked(self):
+
+        selectedNode = self.registrationMatrixSelector.currentNode()
+
+    
+
+        sourcePoints = vtk.vtkPoints()
+
+        targetPoints = vtk.vtkPoints()
+
+        
+
+        node = self.scene.GetNodesByName('ImageFiducials')
+
+        inode = node.GetItemAsObject(0)
+
+    
+
+        numImageFiducials = inode.GetNumberOfFiducials()
+
+        
+
+        node = self.scene.GetNodesByName('TrackingFiducials')
+
+        tnode = node.GetItemAsObject(0)
+
+        
+
+        numTrackingFiducials = tnode.GetNumberOfFiducials()
+
+        
+
+        if numImageFiducials != numTrackingFiducials:
+
+            self.ErrorDialog('Image Fiducials and Tracking Fiducials should have same number of fiducails')
+
+            return
+
+        
+
+        tmpSource = [0, 0, 0]
+
+        tmpTarget = [0, 0, 0]
+
+        
+
+        for j in range(numImageFiducials):
+
+            inode.GetNthFiducialPosition(j, tmpTarget)
+
+            tnode.GetNthFiducialPosition(j, tmpSource)
+
+            targetPoints.InsertNextPoint(tmpTarget)
+
+            sourcePoints.InsertNextPoint(tmpSource)
+
+
+
+        landmarkTransform = vtk.vtkLandmarkTransform()
+
+        landmarkTransform.SetSourceLandmarks(sourcePoints);
+
+        landmarkTransform.SetTargetLandmarks(targetPoints);
+
+        landmarkTransform.SetModeToRigidBody();
+
+        landmarkTransform.Update()
+
+
+
+        transform = vtk.vtkMatrix4x4()
+
+        transform = landmarkTransform.GetMatrix()
+
+        
+
+        selectedNode.ApplyTransformMatrix(landmarkTransform.GetMatrix())
+
+            
+
+        print 'transform', transform.GetElement(0,3), transform.GetElement(1,3), transform.GetElement(2,3)
+
+    
+
+
+    def onApplyRegistrationMatrixButtonClicked(self):
+
+        selectedNode = self.registrationMatrixSelector.currentNode()
+
+        #qt.QMessageBox.information( slicer.util.mainWindow(), 'Information', selectedNode.GetID() )
+
+    
+
+        collectNode = self.scene.GetNodesByName(OIGTL_01_DEVICE_NAME)                    # vtkCollector
+
+        transformNode = collectNode.GetItemAsObject(0)                            # vtkMRMLLinearTransformNode
+
+        transformNode.SetAndObserveTransformNodeID(selectedNode.GetID())
+
+        transformNode.InvokeEvent(slicer.vtkMRMLTransformableNode.TransformModifiedEvent)
+
+
+
+    def WarningDialog(self, message):
+
+        qt.QMessageBox.warning(slicer.util.mainWindow(), "Warning", message)
+
+
+
+    def ErrorDialog(self, message):
+
+        qt.QMessageBox.critical(slicer.util.mainWindow(), "Critical", message)
+
+
+
+    def InformationDialog(self, message):
+
+        qt.QMessageBox.information(slicer.util.mainWindow(), "Information", message)
+
+
+
+
+
+    def OpenIGTLinkConnected(self, a, b):
+
+        print "OpenIGTLink Connected"
+
+
+
+    def OpenIGTLinkDisconnected(self):
+
+        print "OpenIGTLink Disconnected"
+
+
+
+    def OpenIGTLinkActivated(self, a, b):
+
+        print "oigtlConnector Activated, State: ", self.oigtlConnector.GetState()
+
+        print "oigtlConnector1 Activated, State:", self.oigtlConnector1.GetState()
+
+        print "oigtlConnector2 Activated, State:", self.oigtlConnector2.GetState()
+
+
+
+
+
+    def OpenIGTLinkDeactivated(self, a, b):
+
+        print "OpenIGTLink Deactivated"
+
+
+
+    def OpenIGTLinkReceive(self, a, b):
+
+        print "OpenIGTLink Receive"
+
+
+
+    def OpenIGTLinkNewDevice(self, a, b):
+
+        print "OpenIGTLink New Device"
+
+
+
+    # When a new node is added to the scene,
+
+    def NodeAddedEvent(self, caller, event):
+
+        numOIGTLConnectorNode = self.scene.GetNumberOfNodesByClass('vtkMRMLIGTLConnectorNode')
+
+        if numOIGTLConnectorNode != self.numIGTLConnectorNode:
+
+            self.numIGTLConnectorNode = numOIGTLConnectorNode
+
+        if self.oigtlConnector.Start() == 1:
+
+            print "OpenIGTLink connection #1 has been established."
+
+        else:
+
+            print "Couldn't establish an OpenIGTLink Connection #1."
+
+            return
+
+        if self.oigtlConnector1.Start() ==1:
+
+            print "OpenIGTLink connection #2 has been established."
+
+        else:
+
+            print "Couldn't establish an OpenIGTLink Connection #2."
+
+            return
+
+        if self.oigtlConnector2.Start() ==1:
+
+            print "OpenIGTLink connection #3 has been established."
+
+        else:
+
+            print "Couldn't establish an OpenIGTLink Connection #3."
+
+            return
+
+
+
